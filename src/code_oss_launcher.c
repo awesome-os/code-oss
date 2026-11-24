@@ -239,13 +239,16 @@ static int spawn_detached_electron(const char *electron_bin, const char *app_dir
   char cmd[4096];
   int pos = snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\"", electron_bin, app_dir);
   for (int i = 1; i < argc && pos < (int)sizeof(cmd) - 64; i++) {
-    if (strcmp(argv[i], "--upstream") == 0) continue;
+    if (strcmp(argv[i], "--upstream") == 0 || strcmp(argv[i], "--no-splash") == 0) continue;
     pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos, " \"%s\"", argv[i]);
   }
   STARTUPINFOA si = {0};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
-  BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NEW_PROCESS_GROUP, NULL, NULL, &si, &pi);
+  /* DETACHED_PROCESS completely detaches Electron from the parent PowerShell/cmd console
+     so Electron logs never pollute the prompt and closing the window exits cleanly. */
+  DWORD flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+  BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, FALSE, flags, NULL, NULL, &si, &pi);
   if (!ok) return 127;
   CloseHandle(pi.hProcess);
   CloseHandle(pi.hThread);
