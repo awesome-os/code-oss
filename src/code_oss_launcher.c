@@ -234,6 +234,36 @@ static int run_hydration_cli_with_splash(const char *cli_path, int argc, char **
 }
 #endif
 
+typedef struct {
+  unsigned int abi_magic;
+  unsigned int abi_version;
+  const char *app_name;
+  const char *resources_dir;
+  const char *ghost_abi_path;
+} libelectron_host_config_t;
+
+typedef int (*libelectron_main_fn)(void *, int, char **, const libelectron_host_config_t *);
+
+static int try_run_via_libelectron(const char *cas_dir, const char *app_dir, const char *abi_path, int argc, char **argv) {
+#if defined(_WIN32)
+  char dll_path[MAX_PATH_BUF];
+  snprintf(dll_path, sizeof(dll_path), "%s\\libelectron\\libelectron.dll", cas_dir);
+  if (!file_exists(dll_path)) return -999;
+  HMODULE mod = LoadLibraryA(dll_path);
+  if (!mod) return -999;
+  libelectron_main_fn fn = (libelectron_main_fn)GetProcAddress(mod, "libelectron_main");
+  if (!fn) {
+    FreeLibrary(mod);
+    return -999;
+  }
+  libelectron_host_config_t cfg = { 0x33564742u, 1u, "Awesome-OS Code - OSS", app_dir, abi_path };
+  return fn(GetModuleHandleA(NULL), argc, argv, &cfg);
+#else
+  (void)cas_dir; (void)app_dir; (void)abi_path; (void)argc; (void)argv;
+  return -999;
+#endif
+}
+
 static int ensure_isolated_code_oss_runtime(
     const char *cas_dir,
     const char *electron_dir,
@@ -406,6 +436,11 @@ int main(int argc, char **argv) {
 
           if (!no_splash) {
             lumi_splash_set(55, "Warm CAS hit: Electron + Code - OSS + B8G_ARENA_V1");
+          }
+          int lib_rc = try_run_via_libelectron(cas_dir, app_dir, abi_path, argc, argv);
+          if (lib_rc != -999) {
+            if (!no_splash) lumi_splash_close();
+            return lib_rc;
           }
           int rc = spawn_detached_electron(cas_dir, electron_bin, electron_dir, electron_sha, app_dir, argc, argv);
           if (!no_splash) {
