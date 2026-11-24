@@ -221,14 +221,28 @@ export async function resolveGhostAbiEntry(
   return entry;
 }
 
-async function downloadVerifiedBlob(entry: GhostCasEntry, destPath: string): Promise<boolean> {
+function emitProgress(percent: number, message: string): void {
+  if (process.env.CODE_OSS_PROGRESS === '1') {
+    const pct = Math.max(0, Math.min(100, Math.round(percent)));
+    process.stdout.write(`GHOST_PROGRESS ${pct} ${message}\n`);
+  }
+}
+
+async function downloadVerifiedBlob(
+  entry: GhostCasEntry,
+  destPath: string,
+  pctStart = 10,
+  pctEnd = 80,
+): Promise<boolean> {
   if (existsSync(destPath)) {
     const actual = createHash('sha256').update(readFileSync(destPath)).digest('hex');
     if (actual === entry.sha256) {
+      emitProgress(pctEnd, `Warm CAS hit: ${entry.filename}`);
       return true;
     }
   }
 
+  emitProgress(pctStart, `Hydrating ${entry.filename}...`);
   const url = entry.download_url || `${GHOST_CAS_BASE_URL}/${entry.sha256}`;
   const res = await fetch(url, {
     redirect: 'follow',
@@ -237,7 +251,38 @@ async function downloadVerifiedBlob(entry: GhostCasEntry, destPath: string): Pro
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} hydrating ${entry.filename} from ${url}`);
   }
-  const buf = Buffer.from(await res.arrayBuffer());
+
+  const totalBytes = Number(res.headers.get('content-length') ?? entry.bytes ?? 0);
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  let lastPct = -1;
+
+  if (res.body) {
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        received += value.byteLength;
+        if (totalBytes > 0) {
+          const frac = Math.min(1, received / totalBytes);
+          const curPct = Math.round(pctStart + frac * (pctEnd - pctStart));
+          if (curPct !== lastPct) {
+            lastPct = curPct;
+            const mbDone = (received / 1048576).toFixed(1);
+            const mbTot = (totalBytes / 1048576).toFixed(1);
+            emitProgress(curPct, `Downloading ${entry.filename} (${mbDone} / ${mbTot} MB)`);
+          }
+        }
+      }
+    }
+  } else {
+    chunks.push(new Uint8Array(await res.arrayBuffer()));
+  }
+
+  emitProgress(pctEnd, `Verifying SHA-256 for ${entry.filename}...`);
+  const buf = Buffer.concat(chunks);
   const actual = createHash('sha256').update(buf).digest('hex');
   if (actual !== entry.sha256) {
     throw new Error(
@@ -260,12 +305,14 @@ export async function ensureElectronBinary(
   const executablePath = join(installDir, getElectronExecutableRelPath());
 
   if (existsSync(executablePath)) {
+    emitProgress(45, `Warm CAS hit: shared Electron ${entry.version ?? ''}`.trim());
     return { entry, installDir, executablePath, cacheHit: true };
   }
 
   const archivePath = join(cacheDir, `${entry.sha256}.tar.zst`);
-  await downloadVerifiedBlob(entry, archivePath);
+  await downloadVerifiedBlob(entry, archivePath, 10, 42);
 
+  emitProgress(46, `Extracting shared Electron ${entry.version ?? ''}...`.trim());
   mkdirSync(installDir, { recursive: true });
   execFileSync('tar', ['--zstd', '-xf', archivePath, '-C', installDir], { stdio: 'inherit' });
 
@@ -273,6 +320,7 @@ export async function ensureElectronBinary(
     throw new Error(`Extracted Electron archive missing expected binary: ${executablePath}`);
   }
 
+  emitProgress(52, 'Shared Electron ready');
   return { entry, installDir, executablePath, cacheHit: false };
 }
 
@@ -286,17 +334,20 @@ export async function ensureCodeOssApp(
   const pkgMarker = join(appDir, 'package.json');
 
   if (existsSync(pkgMarker)) {
+    emitProgress(88, `Warm CAS hit: Code - OSS ${entry.version ?? ''}`.trim());
     return { entry, installDir, appDir, cacheHit: true };
   }
 
   const archivePath = join(cacheDir, `${entry.sha256}.tar.zst`);
-  await downloadVerifiedBlob(entry, archivePath);
+  await downloadVerifiedBlob(entry, archivePath, 55, 84);
 
+  emitProgress(88, `Extracting Code - OSS ${entry.version ?? ''}...`.trim());
   mkdirSync(appDir, { recursive: true });
   execFileSync('tar', ['--zstd', '-xf', archivePath, '-C', appDir], { stdio: 'inherit' });
 
   const nestedAppDir = join(appDir, 'resources', 'app');
   if (!existsSync(pkgMarker) && existsSync(join(nestedAppDir, 'package.json'))) {
+    emitProgress(96, 'Code - OSS workbench ready');
     return { entry, installDir, appDir: nestedAppDir, cacheHit: false };
   }
 
@@ -304,6 +355,7 @@ export async function ensureCodeOssApp(
     throw new Error(`Extracted Code - OSS archive missing expected package.json at ${pkgMarker}`);
   }
 
+  emitProgress(96, 'Code - OSS workbench ready');
   return { entry, installDir, appDir, cacheHit: false };
 }
 

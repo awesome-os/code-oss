@@ -1,18 +1,7 @@
 /**
  * @file src/code_oss_launcher.c
  * @description Tiny zero-dependency native C11 Win64/Linux self-hydrating launcher
- * for `@awesome-os/code-oss` (~120 KB binary replacing ~350 MB duplicate VSCodium installers).
- *
- * Execution strategy:
- *   1. Handles `--version` / `-v` and `--help` / `-h` instantaneously in native C11.
- *   2. Resolves `~/.b8g/cas` (honoring `B8G_GHOST_CACHE_DIR`).
- *   3. Fast-path (unless `--sectium` or `--dry-run`): reads cached `index.json` (or fetches it
- *      from `awesome-os/b8g-ghost`), checks if shared `electron(.exe)`, `code-oss/<sha256>/resources/app`,
- *      and `b8g-ghost-abi-<os>.node` are already hydrated in `~/.b8g/cas/`. If all three are warm,
- *      injects `B8G_GHOST_ABI_PATH` + `B8G_GHOST_CAS_DIR` and launches Electron directly with zero
- *      Node.js startup overhead.
- *   4. Hydration / fallback path: resolves sibling `src/cli.mts` (or `CODE_OSS_CLI_PATH`) and spawns
- *      `node src/cli.mts [args]` to perform full SHA-256 verified CAS hydration and launch.
+ * with instant (< 15 ms) Lumi White Dragon Hydration Splash optical feedback.
  */
 
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
@@ -22,10 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "lumi_hydration_splash.h"
 
 #if defined(_WIN32)
-  #define WIN32_LEAN_AND_MEAN
-  #include <windows.h>
   #include <process.h>
   #include <io.h>
   #define PATH_SEP '\\'
@@ -50,7 +38,7 @@
   #define OS_ELECTRON_BIN "electron"
 #endif
 
-#define CODE_OSS_LAUNCHER_VERSION "0.1.0"
+#define CODE_OSS_LAUNCHER_VERSION "0.2.0"
 #define MAX_PATH_BUF 1024
 
 static int file_exists(const char *path) {
@@ -106,7 +94,6 @@ static char *read_file_text(const char *path) {
   return buf;
 }
 
-/* Minimal zero-dependency JSON extractor for `"<key>": { ... "sha256": "<64-hex>" ... }` */
 static int lookup_sha256_in_index(const char *json, const char *filename, char out_sha[65]) {
   char key[300];
   snprintf(key, sizeof(key), "\"%s\"", filename);
@@ -155,22 +142,15 @@ static int find_cli_mts(char *out, size_t cap) {
     snprintf(out, cap, "%s", env_cli);
     return 0;
   }
-
   char exe_dir[MAX_PATH_BUF];
   if (get_exe_dir(exe_dir, sizeof(exe_dir)) == 0) {
-    /* Candidate 1: <exe_dir>/src/cli.mts */
     snprintf(out, cap, "%s%csrc%ccli.mts", exe_dir, PATH_SEP, PATH_SEP);
     if (file_exists(out)) return 0;
-
-    /* Candidate 2: <exe_dir>/../src/cli.mts (e.g., dist/code-oss.exe) */
     snprintf(out, cap, "%s%c..%csrc%ccli.mts", exe_dir, PATH_SEP, PATH_SEP, PATH_SEP);
     if (file_exists(out)) return 0;
   }
-
-  /* Candidate 3: ./src/cli.mts */
   snprintf(out, cap, "src%ccli.mts", PATH_SEP);
   if (file_exists(out)) return 0;
-
   return -1;
 }
 
@@ -178,17 +158,112 @@ static void set_env_var(const char *name, const char *value) {
 #if defined(_WIN32)
   SetEnvironmentVariableA(name, value);
 #else
-  setenv(name, value, 1);
+  if (value) setenv(name, value, 1);
+  else unsetenv(name);
 #endif
 }
 
-static int spawn_process(const char *exe, const char *const *argv_list) {
+static void sanitize_electron_env(void) {
+  /* Prevent parent IDE terminals from forcing Electron into headless Node-only mode */
+  set_env_var("ELECTRON_RUN_AS_NODE", NULL);
+  set_env_var("VSCODE_IPC_HOOK", NULL);
+  set_env_var("VSCODE_PID", NULL);
+}
+
 #if defined(_WIN32)
-  intptr_t rc = _spawnvp(_P_WAIT, exe, (const char *const *)argv_list);
-  return (rc < 0) ? 127 : (int)rc;
+static int run_hydration_cli_with_splash(const char *cli_path, int argc, char **argv) {
+  char cmd[4096];
+  int pos = snprintf(cmd, sizeof(cmd), "node \"%s\"", cli_path);
+  for (int i = 1; i < argc && pos < (int)sizeof(cmd) - 64; i++) {
+    pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos, " \"%s\"", argv[i]);
+  }
+  set_env_var("CODE_OSS_PROGRESS", "1");
+
+  SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
+  HANDLE hRead = NULL, hWrite = NULL;
+  if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
+    return 1;
+  }
+  SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+  STARTUPINFOA si = {0};
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+  si.hStdOutput = hWrite;
+  si.hStdError = hWrite;
+  si.wShowWindow = SW_HIDE;
+
+  PROCESS_INFORMATION pi = {0};
+  BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+  CloseHandle(hWrite);
+  if (!ok) {
+    CloseHandle(hRead);
+    return 127;
+  }
+
+  char buf[512];
+  char line[512];
+  size_t line_len = 0;
+  DWORD nread = 0;
+  while (ReadFile(hRead, buf, sizeof(buf) - 1, &nread, NULL) && nread > 0) {
+    for (DWORD i = 0; i < nread; i++) {
+      char c = buf[i];
+      if (c == '\n' || line_len >= sizeof(line) - 1) {
+        line[line_len] = '\0';
+        if (strncmp(line, "GHOST_PROGRESS ", 15) == 0) {
+          int pct = 0;
+          const char *msg = line + 15;
+          char *endp = NULL;
+          pct = (int)strtol(msg, &endp, 10);
+          if (endp && *endp == ' ') msg = endp + 1;
+          lumi_splash_set(pct, msg);
+        }
+        line_len = 0;
+      } else if (c != '\r') {
+        line[line_len++] = c;
+      }
+    }
+  }
+  CloseHandle(hRead);
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD code = 0;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  return (int)code;
+}
+#endif
+
+static int spawn_detached_electron(const char *electron_bin, const char *app_dir, int argc, char **argv) {
+#if defined(_WIN32)
+  char cmd[4096];
+  int pos = snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\"", electron_bin, app_dir);
+  for (int i = 1; i < argc && pos < (int)sizeof(cmd) - 64; i++) {
+    if (strcmp(argv[i], "--upstream") == 0) continue;
+    pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos, " \"%s\"", argv[i]);
+  }
+  STARTUPINFOA si = {0};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi = {0};
+  BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NEW_PROCESS_GROUP, NULL, NULL, &si, &pi);
+  if (!ok) return 127;
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  return 0;
 #else
-  execvp(exe, (char *const *)argv_list);
+  const char **child_argv = (const char **)calloc((size_t)argc + 3, sizeof(char *));
+  if (!child_argv) return 1;
+  int out_i = 0;
+  child_argv[out_i++] = electron_bin;
+  child_argv[out_i++] = app_dir;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--upstream") == 0) continue;
+    child_argv[out_i++] = argv[i];
+  }
+  child_argv[out_i] = NULL;
+  execvp(electron_bin, (char *const *)child_argv);
   perror("execvp");
+  free(child_argv);
   return 127;
 #endif
 }
@@ -196,22 +271,30 @@ static int spawn_process(const char *exe, const char *const *argv_list) {
 int main(int argc, char **argv) {
   int use_sectium = 0;
   int dry_run = 0;
+  int no_splash = 0;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--") == 0) break;
     if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
-      printf("@awesome-os/code-oss-launcher %s (electron=%s | app=%s | abi=%s)\n",
+      printf("@awesome-os/code-oss-launcher %s (electron=%s | app=%s | abi=%s | splash=lumi)\n",
              CODE_OSS_LAUNCHER_VERSION, OS_ELECTRON_KEY, OS_CODE_OSS_KEY, OS_GHOST_ABI_KEY);
       return 0;
     }
     if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-      printf("code-oss native launcher %s (zero-duplication shared Electron + b8g-ghost CAS)\n",
+      printf("code-oss native launcher %s (Lumi Hydration Splash + shared Electron + b8g-ghost CAS)\n",
              CODE_OSS_LAUNCHER_VERSION);
-      printf("Usage: code-oss [--sectium|--upstream] [--dry-run] [--version] [files/folders...]\n");
+      printf("Usage: code-oss [--sectium|--upstream] [--no-splash] [--dry-run] [--version] [files/folders...]\n");
       return 0;
     }
     if (strcmp(argv[i], "--sectium") == 0) use_sectium = 1;
     if (strcmp(argv[i], "--dry-run") == 0) dry_run = 1;
+    if (strcmp(argv[i], "--no-splash") == 0) no_splash = 1;
+  }
+
+  sanitize_electron_env();
+
+  if (!dry_run && !no_splash) {
+    lumi_splash_open("Awesome-OS Code - OSS", "b8g-ghost CAS  |  B8G_ARENA_V1 Zero-Copy", "Checking shared Ghost CAS...");
   }
 
   char cas_dir[MAX_PATH_BUF];
@@ -244,18 +327,17 @@ int main(int argc, char **argv) {
           set_env_var("B8G_GHOST_ABI_PATH", abi_path);
           set_env_var("B8G_GHOST_CAS_DIR", cas_dir);
 
-          const char **child_argv = (const char **)calloc((size_t)argc + 3, sizeof(char *));
-          if (!child_argv) return 1;
-          int out_i = 0;
-          child_argv[out_i++] = electron_bin;
-          child_argv[out_i++] = app_dir;
-          for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "--upstream") == 0) continue;
-            child_argv[out_i++] = argv[i];
+          if (!no_splash) {
+            lumi_splash_set(55, "Warm CAS hit: Electron + Code - OSS + B8G_ARENA_V1");
           }
-          child_argv[out_i] = NULL;
-          int rc = spawn_process(electron_bin, child_argv);
-          free(child_argv);
+          int rc = spawn_detached_electron(electron_bin, app_dir, argc, argv);
+          if (!no_splash) {
+            lumi_splash_set(100, rc == 0 ? "Code - OSS launched!" : "Failed to launch Electron");
+#if defined(_WIN32)
+            Sleep(1200);
+#endif
+            lumi_splash_close();
+          }
           return rc;
         }
       }
@@ -263,25 +345,44 @@ int main(int argc, char **argv) {
     }
   }
 
-  /* Hydration / CLI fallback: delegate to `node src/cli.mts [args]` */
+  /* Cold CAS hydration path -> stream live progress from node src/cli.mts into Lumi Splash */
   char cli_path[MAX_PATH_BUF];
   if (find_cli_mts(cli_path, sizeof(cli_path)) != 0) {
-    fprintf(stderr,
-            "[awesome-os/code-oss] CAS is cold and src/cli.mts was not found.\n"
-            "Set CODE_OSS_CLI_PATH or run `pnx @awesome-os/code-oss` to hydrate ~/.b8g/cas/.\n");
+    if (!dry_run && !no_splash) {
+      lumi_splash_set(0, "Error: src/cli.mts not found (set CODE_OSS_CLI_PATH)");
+#if defined(_WIN32)
+      Sleep(2000);
+#endif
+      lumi_splash_close();
+    }
+    fprintf(stderr, "code-oss: could not locate src/cli.mts (set CODE_OSS_CLI_PATH).\n");
     return 1;
   }
 
+  if (!dry_run && !no_splash) {
+    lumi_splash_set(12, "Hydrating shared Electron + Code - OSS from cas-v1...");
+  }
+
+#if defined(_WIN32)
+  int rc = (!dry_run && !no_splash)
+      ? run_hydration_cli_with_splash(cli_path, argc, argv)
+      : (int)_spawnlp(_P_WAIT, "node", "node", cli_path, (argc > 1 ? argv[1] : NULL), NULL);
+  if (!dry_run && !no_splash) {
+    lumi_splash_set(100, rc == 0 ? "Hydration complete!" : "Hydration exited with error");
+    Sleep(800);
+    lumi_splash_close();
+  }
+  return rc;
+#else
   const char **node_argv = (const char **)calloc((size_t)argc + 3, sizeof(char *));
   if (!node_argv) return 1;
   node_argv[0] = "node";
   node_argv[1] = cli_path;
-  for (int i = 1; i < argc; i++) {
-    node_argv[i + 1] = argv[i];
-  }
+  for (int i = 1; i < argc; i++) node_argv[i + 1] = argv[i];
   node_argv[argc + 1] = NULL;
-
-  int rc = spawn_process("node", node_argv);
+  execvp("node", (char *const *)node_argv);
+  perror("execvp");
   free(node_argv);
-  return rc;
+  return 127;
+#endif
 }
