@@ -3,8 +3,11 @@
  * @file src/cli.mts
  * @description Zero-duplication `code-oss` CLI:
  *   - Default / `--upstream`: hydrates shared Electron + debloated Code - OSS `resources/app`
- *     + `b8g-ghost-abi-<os>.node` from `awesome-os/b8g-ghost @ cas-v1`, injects
- *     `B8G_GHOST_ABI_PATH` and `B8G_GHOST_CAS_DIR`, and launches:
+ *     + `b8g-ghost-abi-<os>.node` + Wave 2 TypeScript `6.0.3` (`typescript-6.0.3-programmable.tar.gz`)
+ *     from `awesome-os/b8g-ghost @ cas-v1`, prepares `~/.b8g/cas/extensions/` for the 5 bundled
+ *     Awesome-OS extensions, injects `B8G_GHOST_ABI_PATH`, `B8G_GHOST_CAS_DIR`,
+ *     `AWESOME_OS_TYPESCRIPT_TSDK`, `TYPESCRIPT_TSDK`, `B8G_SHARED_EXTENSIONS_DIR`, and
+ *     `AWESOME_OS_BUNDLED_EXTENSIONS`, and launches:
  *       `electron <cas>/code-oss/<sha256>/resources/app [user args]`
  *   - `--sectium` / `CODE_OSS_BACKEND=sectium`: routes via `sectium-electron` instead of
  *     upstream Electron.
@@ -18,18 +21,25 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  AWESOME_OS_BUNDLED_EXTENSIONS,
   ensureCodeOssApp,
   ensureElectronBinary,
+  ensureFastTypeScript,
   ensureGhostAbiAddonPath,
+  ensureSharedExtensionsDir,
   fetchGhostIndex,
   getCodeOssAppAssetKey,
   getElectronAssetKey,
   getElectronExecutableRelPath,
   getGhostAbiAssetKey,
   getGhostCacheDir,
+  getSharedExtensionsDir,
+  getTypeScriptAssetKey,
   resolveElectronEntry,
   resolveGhostAbiEntry,
+  resolveTypeScriptEntry,
   tryResolveCodeOssAppEntry,
+  type BundledExtensionSpec,
 } from './hydrate.mts';
 
 export interface ParsedCliArgs {
@@ -44,6 +54,8 @@ export interface LaunchPlan {
   version: string;
   backend: 'sectium' | 'upstream';
   cacheDir: string;
+  extensionsDir: string;
+  bundledExtensions: readonly BundledExtensionSpec[];
   electron: {
     assetKey: string;
     sha256: string;
@@ -64,6 +76,14 @@ export interface LaunchPlan {
     sha256: string;
     bytes: number;
     addonPath: string;
+  };
+  typescript: {
+    assetKey: string;
+    sha256: string;
+    bytes: number;
+    version: string | null;
+    installDir: string;
+    tsdkDir: string;
   };
   forwardArgs: string[];
 }
@@ -162,15 +182,18 @@ export function resolveSectiumEntrypoint(): string | null {
 export async function buildLaunchPlan(parsed: ParsedCliArgs): Promise<LaunchPlan> {
   const idx = await fetchGhostIndex();
   const cacheDir = getGhostCacheDir();
+  const extensionsDir = getSharedExtensionsDir();
 
   const electronKey = getElectronAssetKey();
   const codeOssKey = getCodeOssAppAssetKey();
   const ghostAbiKey = getGhostAbiAssetKey();
+  const typescriptKey = getTypeScriptAssetKey();
 
-  const [electronEntry, codeOssEntry, ghostAbiEntry] = await Promise.all([
+  const [electronEntry, codeOssEntry, ghostAbiEntry, typescriptEntry] = await Promise.all([
     resolveElectronEntry(electronKey, idx),
     tryResolveCodeOssAppEntry(codeOssKey, idx),
     resolveGhostAbiEntry(ghostAbiKey, idx),
+    resolveTypeScriptEntry(typescriptKey, idx),
   ]);
 
   const electronExec = join(cacheDir, 'electron', electronEntry.sha256, getElectronExecutableRelPath());
@@ -178,11 +201,16 @@ export async function buildLaunchPlan(parsed: ParsedCliArgs): Promise<LaunchPlan
     ? join(cacheDir, 'code-oss', codeOssEntry.sha256, 'resources', 'app')
     : null;
   const ghostAbiPath = join(cacheDir, 'ghost-abi', ghostAbiEntry.sha256, ghostAbiEntry.filename);
+  const tsInstallDir = join(cacheDir, 'typescript', typescriptEntry.sha256);
+  const tsPackageLibDir = join(tsInstallDir, 'package', 'lib');
+  const tsdkDir = existsSync(tsPackageLibDir) ? tsPackageLibDir : join(tsInstallDir, 'lib');
 
   return {
     version: getPackageVersion(),
     backend: parsed.backend,
     cacheDir,
+    extensionsDir,
+    bundledExtensions: AWESOME_OS_BUNDLED_EXTENSIONS,
     electron: {
       assetKey: electronKey,
       sha256: electronEntry.sha256,
@@ -204,6 +232,14 @@ export async function buildLaunchPlan(parsed: ParsedCliArgs): Promise<LaunchPlan
       bytes: ghostAbiEntry.bytes,
       addonPath: ghostAbiPath,
     },
+    typescript: {
+      assetKey: typescriptKey,
+      sha256: typescriptEntry.sha256,
+      bytes: typescriptEntry.bytes,
+      version: typescriptEntry.version ?? '6.0.3',
+      installDir: tsInstallDir,
+      tsdkDir,
+    },
     forwardArgs: parsed.forwardArgs,
   };
 }
@@ -213,7 +249,7 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
 
   if (parsed.showVersion) {
     console.log(
-      `@awesome-os/code-oss ${getPackageVersion()} (${process.platform}/${process.arch} | electron=${getElectronAssetKey()} | app=${getCodeOssAppAssetKey()} | abi=${getGhostAbiAssetKey()})`,
+      `@awesome-os/code-oss ${getPackageVersion()} (${process.platform}/${process.arch} | electron=${getElectronAssetKey()} | app=${getCodeOssAppAssetKey()} | abi=${getGhostAbiAssetKey()} | ts=${getTypeScriptAssetKey()})`,
     );
     return;
   }
@@ -242,6 +278,8 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
     return;
   }
 
+  const bundledExtensionIds = AWESOME_OS_BUNDLED_EXTENSIONS.map((ext) => ext.id).join(',');
+
   if (parsed.backend === 'sectium') {
     const sectiumEntry = resolveSectiumEntrypoint();
     if (!sectiumEntry) {
@@ -260,14 +298,16 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
       process.exit(1);
     }
 
-    const [codeOssApp, ghostAbi] = await Promise.all([
+    const [codeOssApp, ghostAbi, typescript] = await Promise.all([
       ensureCodeOssApp(),
       ensureGhostAbiAddonPath(),
+      ensureFastTypeScript(),
     ]);
+    const extensionsDir = ensureSharedExtensionsDir();
 
     if (process.env.CODE_OSS_VERBOSE === '1') {
       console.error(
-        `[awesome-os/code-oss] sectium=${sectiumEntry} app=${codeOssApp.appDir} ghostAbi=${ghostAbi.addonPath}`,
+        `[awesome-os/code-oss] sectium=${sectiumEntry} app=${codeOssApp.appDir} ghostAbi=${ghostAbi.addonPath} tsdk=${typescript.tsdkDir} extensionsDir=${extensionsDir}`,
       );
     }
 
@@ -278,6 +318,10 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
         ...process.env,
         B8G_GHOST_ABI_PATH: ghostAbi.addonPath,
         B8G_GHOST_CAS_DIR: ghostAbi.cacheDir,
+        AWESOME_OS_TYPESCRIPT_TSDK: typescript.tsdkDir,
+        TYPESCRIPT_TSDK: typescript.tsdkDir,
+        B8G_SHARED_EXTENSIONS_DIR: extensionsDir,
+        AWESOME_OS_BUNDLED_EXTENSIONS: bundledExtensionIds,
       },
     });
 
@@ -287,11 +331,13 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
     return;
   }
 
-  const [electron, codeOssApp, ghostAbi] = await Promise.all([
+  const [electron, codeOssApp, ghostAbi, typescript] = await Promise.all([
     ensureElectronBinary(),
     ensureCodeOssApp(),
     ensureGhostAbiAddonPath(),
+    ensureFastTypeScript(),
   ]);
+  const extensionsDir = ensureSharedExtensionsDir();
 
   if (process.env.CODE_OSS_VERBOSE === '1') {
     console.error(
@@ -303,6 +349,10 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
     console.error(
       `[awesome-os/code-oss] ghostAbi=${ghostAbi.addonPath} (cacheHit=${ghostAbi.cacheHit})`,
     );
+    console.error(
+      `[awesome-os/code-oss] typescript=${typescript.tsdkDir} (cacheHit=${typescript.cacheHit})`,
+    );
+    console.error(`[awesome-os/code-oss] extensionsDir=${extensionsDir}`);
   }
 
   // Link <electron_dir>/resources/app -> <code_oss_dir>/resources/app (zero-copy junction/symlink)
@@ -327,6 +377,10 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
     ...process.env,
     B8G_GHOST_ABI_PATH: ghostAbi.addonPath,
     B8G_GHOST_CAS_DIR: ghostAbi.cacheDir,
+    AWESOME_OS_TYPESCRIPT_TSDK: typescript.tsdkDir,
+    TYPESCRIPT_TSDK: typescript.tsdkDir,
+    B8G_SHARED_EXTENSIONS_DIR: extensionsDir,
+    AWESOME_OS_BUNDLED_EXTENSIONS: bundledExtensionIds,
   };
   delete childEnv.ELECTRON_RUN_AS_NODE;
   delete childEnv.VSCODE_IPC_HOOK;

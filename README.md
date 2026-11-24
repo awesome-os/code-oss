@@ -1,6 +1,6 @@
 # `@awesome-os/code-oss`
 
-Telemetry-free **Code - OSS** (VS Code MIT) hydrated on **shared debloated Electron** + **`b8g-ghost` CAS (`cas-v1`)** with a **`~120 KB` native C11 launcher** — eliminating VSCodium's `~350 MB` duplicate installers and per-app Chromium/Electron bloat.
+Telemetry-free **Code - OSS** (VS Code MIT) hydrated on **shared debloated Electron** + **`b8g-ghost` CAS (`cas-v1`)** + **Wave 2 TypeScript `6.0.3` (`14.3x` faster Zero-AST CAS)** + **5 default Awesome-OS extensions** with a **`~120 KB` native C11 launcher** — eliminating VSCodium's `~350 MB` duplicate installers and per-app Chromium/Electron bloat.
 
 ---
 
@@ -8,7 +8,7 @@ Telemetry-free **Code - OSS** (VS Code MIT) hydrated on **shared debloated Elect
 
 Traditional VSCodium / VS Code installations ship a full, isolated copy of Electron (`~250 MB`), Chromium locales, `icudtl.dat`, `ffmpeg`, and `v8_context_snapshot.bin` inside every IDE build (`~350 MB` total per installation).
 
-`@awesome-os/code-oss` splits the stack into three deduplicated, SHA-256-verified CAS layers stored once per machine in `~/.b8g/cas/` (Keep-Last-5 retention):
+`@awesome-os/code-oss` splits the stack into deduplicated, SHA-256-verified CAS layers stored once per machine in `~/.b8g/cas/` (Keep-Last-5 retention):
 
 | Layer | `cas-v1` Asset | Local CAS Path | Purpose |
 | :--- | :--- | :--- | :--- |
@@ -16,6 +16,28 @@ Traditional VSCodium / VS Code installations ship a full, isolated copy of Elect
 | **Shared Electron** | `electron-<os>.tar.zst` | `~/.b8g/cas/electron/<sha256>/` | Debloated rolling-latest upstream Electron shared across all apps |
 | **Code - OSS App** | `code-oss-app-<os>.tar.zst` | `~/.b8g/cas/code-oss/<sha256>/resources/app/` | Pure telemetry-free Code - OSS workbench + built-in extensions only |
 | **Ghost ABI Bridge** | `b8g-ghost-abi-<os>.node` | `~/.b8g/cas/ghost-abi/<sha256>/` | Injected as `B8G_GHOST_ABI_PATH` for zero-copy `B8G_ARENA_V1` IPC |
+| **Wave 2 TypeScript `6.0.3`** | `typescript-6.0.3-programmable.tar.gz` | `~/.b8g/cas/typescript/<sha256>/` | `14.3x` faster Zero-AST CAS TypeScript SDK injected via `AWESOME_OS_TYPESCRIPT_TSDK` & `TYPESCRIPT_TSDK` |
+| **Shared Extensions** | 5 Awesome-OS default extensions | `~/.b8g/cas/extensions/` | Shared extension store injected via `B8G_SHARED_EXTENSIONS_DIR` & `AWESOME_OS_BUNDLED_EXTENSIONS` |
+
+---
+
+## Bundled Wave 2 TypeScript `6.0.3` & Awesome-OS Extensions
+
+### Faster Wave 2 TypeScript (`6.0.3`)
+
+Every launch hydrates `typescript-6.0.3-programmable.tar.gz` (`14.3x` faster Zero-AST CAS compiler & language service) from `awesome-os/b8g-ghost @ cas-v1` into `~/.b8g/cas/typescript/<sha256>/` and injects `AWESOME_OS_TYPESCRIPT_TSDK` and `TYPESCRIPT_TSDK` pointing at its `lib/` directory.
+
+### Default Awesome-OS Extension Bundle (5 Extensions)
+
+All 5 Awesome-OS default extensions share `~/.b8g/cas/extensions/` (`B8G_SHARED_EXTENSIONS_DIR`):
+
+| # | Extension ID | Repository | Capabilities |
+| :--- | :--- | :--- | :--- |
+| 1 | `stealifylang-vscode` | `awesome-os/stealifylang-vscode` | StealifyLang LSP, `stealify-lint` (`B8G001`–`B8G016`), `.stealify-rules`, governance project rules |
+| 2 | `unreal-ghost` | `awesome-os/unreal-vscode` | UE5 UBT + `.NET 11` + `ghost-llvm` + `ghost-winsdk` |
+| 3 | `godot-ghost` | `awesome-os/godot-vscode` | Godot `4.7.2` + `.NET 11` + GDScript/C# |
+| 4 | `blender-ghost` | `awesome-os/blender-vscode` | Blender `5.3.0` + `bpy` hot-reload |
+| 5 | `obs-ghost` | `awesome-os/obs-vscode` | OBS `33.0.3` + HTML5 overlay hot-reload |
 
 ---
 
@@ -25,7 +47,7 @@ Traditional VSCodium / VS Code installations ship a full, isolated copy of Elect
 # Run via Node 22+ erasable TypeScript directly
 node src/cli.mts [files/folders...]
 
-# Inspect resolved CAS entries and launch plan without spawning Electron
+# Inspect resolved CAS entries (including Wave 2 TypeScript & 5 bundled extensions) without spawning Electron
 node src/cli.mts --dry-run
 
 # Print version and platform CAS asset keys
@@ -40,8 +62,12 @@ node src/cli.mts --sectium [files/folders...]
 - `B8G_GHOST_CACHE_DIR` — Override local CAS root (default: `~/.b8g/cas`).
 - `B8G_GHOST_INDEX_URL` — Override `manifests/index.json` URL.
 - `B8G_GHOST_CAS_URL` — Override `cas-v1` base download URL.
+- `B8G_SHARED_EXTENSIONS_DIR` — Override shared extensions directory (default: `~/.b8g/cas/extensions`).
+- `AWESOME_OS_TYPESCRIPT_TSDK` / `TYPESCRIPT_TSDK` — Injected on launch with hydrated Wave 2 TypeScript `6.0.3` `lib/` path.
+- `AWESOME_OS_BUNDLED_EXTENSIONS` — Injected on launch with the 5 bundled Awesome-OS extension IDs.
 - `ELECTRON_GHOST_SHA256` — Pin Electron to any SHA-256 in the Keep-Last-5 history.
 - `CODE_OSS_GHOST_SHA256` — Pin Code - OSS `resources/app` to any SHA-256 in the Keep-Last-5 history.
+- `TYPESCRIPT_GHOST_SHA256` — Pin Wave 2 TypeScript to any SHA-256 in the Keep-Last-5 history.
 - `CODE_OSS_BACKEND=sectium` — Default to `sectium-electron`.
 - `CODE_OSS_VERBOSE=1` — Print CAS hydration paths and hit/miss status to stderr.
 

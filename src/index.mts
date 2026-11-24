@@ -4,9 +4,12 @@
  */
 
 export {
+  AWESOME_OS_BUNDLED_EXTENSIONS,
   ensureCodeOssApp,
   ensureElectronBinary,
+  ensureFastTypeScript,
   ensureGhostAbiAddonPath,
+  ensureSharedExtensionsDir,
   fetchGhostIndex,
   GHOST_CAS_BASE_URL,
   GHOST_INDEX_URL,
@@ -15,11 +18,15 @@ export {
   getElectronExecutableRelPath,
   getGhostAbiAssetKey,
   getGhostCacheDir,
+  getSharedExtensionsDir,
+  getTypeScriptAssetKey,
   hydrateCodeOssStack,
   resolveCodeOssAppEntry,
   resolveElectronEntry,
   resolveGhostAbiEntry,
+  resolveTypeScriptEntry,
   tryResolveCodeOssAppEntry,
+  type BundledExtensionSpec,
   type GhostCasEntry,
   type GhostCasHistoryItem,
   type GhostIndex,
@@ -27,6 +34,7 @@ export {
   type HydratedCodeOssStack,
   type HydratedElectronResult,
   type HydratedGhostAbiResult,
+  type HydratedTypeScriptResult,
 } from './hydrate.mts';
 
 export {

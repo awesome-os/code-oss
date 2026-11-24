@@ -3,9 +3,13 @@
  * @description Resolves and hydrates:
  *   (a) Shared debloated Electron (`electron-<os>.tar.zst`) into `~/.b8g/cas/electron/<sha256>/`,
  *   (b) Debloated telemetry-free Code - OSS `resources/app` (`code-oss-app-<os>.tar.zst`)
- *       into `~/.b8g/cas/code-oss/<sha256>/resources/app/`, and
+ *       into `~/.b8g/cas/code-oss/<sha256>/resources/app/`,
  *   (c) Native `b8g-ghost-abi-<os>.node` into `~/.b8g/cas/ghost-abi/<sha256>/`
- *       for `B8G_GHOST_ABI_PATH` injection.
+ *       for `B8G_GHOST_ABI_PATH` injection,
+ *   (d) Wave 2 TypeScript `6.0.3` (`typescript-6.0.3-programmable.tar.gz`, 14.3x faster Zero-AST CAS)
+ *       into `~/.b8g/cas/typescript/<sha256>/` for `AWESOME_OS_TYPESCRIPT_TSDK` / `TYPESCRIPT_TSDK`, and
+ *   (e) Shared Awesome-OS extension directory (`~/.b8g/cas/extensions/`) with the 5 default
+ *       Awesome-OS bundled extensions (`stealifylang-vscode` + 4 studio extensions).
  *
  * All artifacts are SHA-256 verified against `awesome-os/b8g-ghost @ cas-v1` (Keep-Last-5).
  */
@@ -71,10 +75,54 @@ export interface HydratedGhostAbiResult {
   cacheHit: boolean;
 }
 
+export interface HydratedTypeScriptResult {
+  entry: GhostCasEntry;
+  installDir: string;
+  tsdkDir: string;
+  cacheHit: boolean;
+}
+
+export interface BundledExtensionSpec {
+  id: string;
+  repo: string;
+  description: string;
+}
+
+export const AWESOME_OS_BUNDLED_EXTENSIONS: readonly BundledExtensionSpec[] = Object.freeze([
+  {
+    id: 'stealifylang-vscode',
+    repo: 'awesome-os/stealifylang-vscode',
+    description:
+      'StealifyLang LSP, stealify-lint (B8G001-B8G016), .stealify-rules, and governance project rules',
+  },
+  {
+    id: 'unreal-ghost',
+    repo: 'awesome-os/unreal-vscode',
+    description: 'UE5 UBT + .NET 11 + ghost-llvm + ghost-winsdk',
+  },
+  {
+    id: 'godot-ghost',
+    repo: 'awesome-os/godot-vscode',
+    description: 'Godot 4.7.2 + .NET 11 + GDScript/C#',
+  },
+  {
+    id: 'blender-ghost',
+    repo: 'awesome-os/blender-vscode',
+    description: 'Blender 5.3.0 + bpy hot-reload',
+  },
+  {
+    id: 'obs-ghost',
+    repo: 'awesome-os/obs-vscode',
+    description: 'OBS 33.0.3 + HTML5 overlay hot-reload',
+  },
+]);
+
 export interface HydratedCodeOssStack {
   electron: HydratedElectronResult;
   codeOssApp: HydratedCodeOssAppResult;
   ghostAbi: HydratedGhostAbiResult;
+  typescript: HydratedTypeScriptResult;
+  extensionsDir: string;
 }
 
 let cachedIndex: GhostIndex | null = null;
@@ -83,6 +131,20 @@ export function getGhostCacheDir(): string {
   const dir = process.env.B8G_GHOST_CACHE_DIR ?? join(homedir(), '.b8g', 'cas');
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+export function getSharedExtensionsDir(): string {
+  return process.env.B8G_SHARED_EXTENSIONS_DIR ?? join(getGhostCacheDir(), 'extensions');
+}
+
+export function ensureSharedExtensionsDir(): string {
+  const dir = getSharedExtensionsDir();
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function getTypeScriptAssetKey(): string {
+  return 'typescript-6.0.3-programmable.tar.gz';
 }
 
 export function getElectronAssetKey(
@@ -219,6 +281,20 @@ export async function resolveGhostAbiEntry(
     );
   }
   return entry;
+}
+
+export async function resolveTypeScriptEntry(
+  assetKey = getTypeScriptAssetKey(),
+  index?: GhostIndex,
+): Promise<GhostCasEntry> {
+  const idx = index ?? (await fetchGhostIndex());
+  const entry = idx.entries[assetKey];
+  if (!entry) {
+    throw new Error(
+      `TypeScript asset "${assetKey}" not found in b8g-ghost cas-v1 index (${idx.total_entries} entries)`,
+    );
+  }
+  return applyKeepLast5Pin(entry, process.env.TYPESCRIPT_GHOST_SHA256);
 }
 
 function emitProgress(percent: number, message: string): void {
@@ -373,11 +449,55 @@ export async function ensureGhostAbiAddonPath(
   return { entry, addonPath, cacheDir, cacheHit };
 }
 
+function resolveExtractedTsdkDir(installDir: string): string {
+  const candidates = [
+    join(installDir, 'lib'),
+    join(installDir, 'package', 'lib'),
+    installDir,
+  ];
+  for (const dir of candidates) {
+    if (existsSync(join(dir, 'tsserver.js')) || existsSync(join(dir, 'typescript.js'))) {
+      return dir;
+    }
+  }
+  return join(installDir, 'lib');
+}
+
+export async function ensureFastTypeScript(
+  assetKey = getTypeScriptAssetKey(),
+): Promise<HydratedTypeScriptResult> {
+  const entry = await resolveTypeScriptEntry(assetKey);
+  const cacheDir = getGhostCacheDir();
+  const installDir = join(cacheDir, 'typescript', entry.sha256);
+  const existingTsdk = resolveExtractedTsdkDir(installDir);
+
+  if (
+    existsSync(join(existingTsdk, 'tsserver.js')) ||
+    existsSync(join(existingTsdk, 'typescript.js'))
+  ) {
+    emitProgress(98, `Warm CAS hit: Wave 2 TypeScript ${entry.version ?? '6.0.3'}`);
+    return { entry, installDir, tsdkDir: existingTsdk, cacheHit: true };
+  }
+
+  const archivePath = join(cacheDir, `${entry.sha256}.tar.gz`);
+  await downloadVerifiedBlob(entry, archivePath, 90, 96);
+
+  emitProgress(97, `Extracting Wave 2 TypeScript ${entry.version ?? '6.0.3'}...`);
+  mkdirSync(installDir, { recursive: true });
+  execFileSync('tar', ['-xzf', archivePath, '-C', installDir], { stdio: 'inherit' });
+
+  const tsdkDir = resolveExtractedTsdkDir(installDir);
+  emitProgress(99, 'Wave 2 TypeScript 6.0.3 ready');
+  return { entry, installDir, tsdkDir, cacheHit: false };
+}
+
 export async function hydrateCodeOssStack(): Promise<HydratedCodeOssStack> {
-  const [electron, codeOssApp, ghostAbi] = await Promise.all([
+  const [electron, codeOssApp, ghostAbi, typescript] = await Promise.all([
     ensureElectronBinary(),
     ensureCodeOssApp(),
     ensureGhostAbiAddonPath(),
+    ensureFastTypeScript(),
   ]);
-  return { electron, codeOssApp, ghostAbi };
+  const extensionsDir = ensureSharedExtensionsDir();
+  return { electron, codeOssApp, ghostAbi, typescript, extensionsDir };
 }

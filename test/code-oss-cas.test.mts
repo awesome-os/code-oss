@@ -5,15 +5,21 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  AWESOME_OS_BUNDLED_EXTENSIONS,
   buildLaunchPlan,
+  ensureFastTypeScript,
   ensureGhostAbiAddonPath,
+  ensureSharedExtensionsDir,
   fetchGhostIndex,
   getCodeOssAppAssetKey,
   getElectronAssetKey,
   getGhostAbiAssetKey,
+  getSharedExtensionsDir,
+  getTypeScriptAssetKey,
   parseCliArgs,
   resolveElectronEntry,
   resolveGhostAbiEntry,
+  resolveTypeScriptEntry,
   tryResolveCodeOssAppEntry,
 } from '../src/index.mts';
 
@@ -35,6 +41,55 @@ test('resolves shared debloated Electron and b8g-ghost-abi.node from live cas-v1
   assert.equal(abi.filename, abiKey);
   assert.match(abi.sha256, /^[a-f0-9]{64}$/);
   assert.ok(abi.bytes > 1_000, 'Expected real native N-API Ghost ABI addon');
+});
+
+test('resolves and hydrates Wave 2 TypeScript 6.0.3 (typescript-6.0.3-programmable.tar.gz) from live cas-v1', async () => {
+  const index = await fetchGhostIndex();
+  const tsKey = getTypeScriptAssetKey();
+  assert.equal(tsKey, 'typescript-6.0.3-programmable.tar.gz');
+
+  const tsEntry = await resolveTypeScriptEntry(tsKey, index);
+  assert.equal(tsEntry.filename, tsKey);
+  assert.match(tsEntry.sha256, /^[a-f0-9]{64}$/);
+  assert.ok(tsEntry.bytes > 500_000, 'Expected real Wave 2 TypeScript 6.0.3 archive (>500 KB)');
+
+  const first = await ensureFastTypeScript(tsKey);
+  assert.equal(first.entry.sha256, tsEntry.sha256);
+  assert.equal(existsSync(first.installDir), true);
+  assert.ok(
+    existsSync(resolve(first.tsdkDir, 'tsserver.js')) ||
+      existsSync(resolve(first.tsdkDir, 'typescript.js')),
+    `Expected tsserver.js or typescript.js in ${first.tsdkDir}`,
+  );
+
+  const second = await ensureFastTypeScript(tsKey);
+  assert.equal(second.tsdkDir, first.tsdkDir);
+  assert.equal(second.cacheHit, true);
+});
+
+test('exports all 5 Awesome-OS bundled extensions and shared ~/.b8g/cas/extensions directory', () => {
+  assert.equal(AWESOME_OS_BUNDLED_EXTENSIONS.length, 5);
+
+  const expected = [
+    { id: 'stealifylang-vscode', repo: 'awesome-os/stealifylang-vscode' },
+    { id: 'unreal-ghost', repo: 'awesome-os/unreal-vscode' },
+    { id: 'godot-ghost', repo: 'awesome-os/godot-vscode' },
+    { id: 'blender-ghost', repo: 'awesome-os/blender-vscode' },
+    { id: 'obs-ghost', repo: 'awesome-os/obs-vscode' },
+  ];
+
+  for (const exp of expected) {
+    const found = AWESOME_OS_BUNDLED_EXTENSIONS.find((ext) => ext.id === exp.id);
+    assert.ok(found, `Expected bundled extension ${exp.id}`);
+    assert.equal(found.repo, exp.repo);
+    assert.ok(found.description.length > 0);
+  }
+
+  const sharedDir = getSharedExtensionsDir();
+  assert.ok(sharedDir.endsWith('extensions'), `Expected extensions dir, got ${sharedDir}`);
+  const ensuredDir = ensureSharedExtensionsDir();
+  assert.equal(ensuredDir, sharedDir);
+  assert.equal(existsSync(ensuredDir), true);
 });
 
 test('checks code-oss-app-* entry in live cas-v1 index if published', async () => {
@@ -84,7 +139,7 @@ test('parses CLI flags (--sectium, --upstream, --dry-run, --version, passthrough
   assert.equal(upstreamOverride.backend, 'upstream');
 });
 
-test('CLI --version and --dry-run execute cleanly and resolve CAS plan', async () => {
+test('CLI --version and --dry-run execute cleanly and resolve CAS plan with TypeScript & 5 bundled extensions', async () => {
   const versionOut = execFileSync(process.execPath, [CLI_PATH, '--version'], {
     encoding: 'utf8',
   }).trim();
@@ -92,6 +147,7 @@ test('CLI --version and --dry-run execute cleanly and resolve CAS plan', async (
   assert.ok(versionOut.includes(getElectronAssetKey()));
   assert.ok(versionOut.includes(getCodeOssAppAssetKey()));
   assert.ok(versionOut.includes(getGhostAbiAssetKey()));
+  assert.ok(versionOut.includes(getTypeScriptAssetKey()));
 
   const dryRunOut = execFileSync(process.execPath, [CLI_PATH, '--dry-run', 'workspace'], {
     encoding: 'utf8',
@@ -102,6 +158,15 @@ test('CLI --version and --dry-run execute cleanly and resolve CAS plan', async (
   assert.match(plan.electron.sha256, /^[a-f0-9]{64}$/);
   assert.equal(plan.ghostAbi.assetKey, getGhostAbiAssetKey());
   assert.match(plan.ghostAbi.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(plan.typescript.assetKey, 'typescript-6.0.3-programmable.tar.gz');
+  assert.match(plan.typescript.sha256, /^[a-f0-9]{64}$/);
+  assert.ok(plan.typescript.tsdkDir.includes('typescript'));
+  assert.equal(plan.extensionsDir, getSharedExtensionsDir());
+  assert.equal(plan.bundledExtensions.length, 5);
+  assert.deepEqual(
+    plan.bundledExtensions.map((ext) => ext.id),
+    ['stealifylang-vscode', 'unreal-ghost', 'godot-ghost', 'blender-ghost', 'obs-ghost'],
+  );
   assert.ok(plan.codeOssApp.status === 'resolved' || plan.codeOssApp.status === 'pending-ingest');
   assert.deepEqual(plan.forwardArgs, ['workspace']);
 });
