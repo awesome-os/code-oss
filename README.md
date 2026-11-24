@@ -2,6 +2,40 @@
 
 Telemetry-free **Code - OSS** (VS Code MIT) hydrated on **shared debloated Electron** + **`b8g-ghost` CAS (`cas-v1`)** + **Wave 2 TypeScript `6.0.3` (`14.3x` faster Zero-AST CAS)** + **5 default Awesome-OS extensions** with a **`~120 KB` native C11 launcher** — eliminating VSCodium's `~350 MB` duplicate installers and per-app Chromium/Electron bloat.
 
+## Quick Install & Usage
+
+### Windows (PowerShell 1-liner)
+
+```powershell
+irm https://github.com/awesome-os/code-oss/releases/latest/download/install.ps1 | iex
+```
+
+### Linux (x64 / ARM64) & macOS (Apple Silicon)
+
+```sh
+curl -fsSL https://github.com/awesome-os/code-oss/releases/latest/download/install.sh | sh
+```
+
+### CLI Usage
+
+```powershell
+# Inspect installed launcher version & help
+code-oss --version
+code-oss --help
+
+# Open current workspace or a specific project directory
+code-oss .
+code-oss ./my-project
+
+# Optional: store hydrated CAS layers on a custom drive/path
+$env:B8G_GHOST_CACHE_DIR = "D:\b8g-cas"   # POSIX: export B8G_GHOST_CACHE_DIR=/data/b8g-cas
+code-oss .
+```
+
+### Releases & Verification
+
+- **Latest Release:** [`awesome-os/code-oss` Releases](https://github.com/awesome-os/code-oss/releases/latest) — includes `SHA256SUMS.txt` and the 5-OS matrix (`win64`, `linux-x64`, `linux-arm64`, `macos-arm64`, `wasm32-wasi`) built via [`awesome-os/maintenance-workflows`](https://github.com/awesome-os/maintenance-workflows).
+
 ---
 
 ## Why `@awesome-os/code-oss`?
