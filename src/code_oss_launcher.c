@@ -234,10 +234,44 @@ static int run_hydration_cli_with_splash(const char *cli_path, int argc, char **
 }
 #endif
 
-static int spawn_detached_electron(const char *electron_bin, const char *app_dir, int argc, char **argv) {
+static int ensure_resources_app_link(const char *electron_dir, const char *app_dir) {
+#if defined(_WIN32)
+  char link_path[MAX_PATH_BUF];
+  snprintf(link_path, sizeof(link_path), "%s\\resources\\app", electron_dir);
+  char marker[MAX_PATH_BUF];
+  snprintf(marker, sizeof(marker), "%s\\package.json", link_path);
+  if (file_exists(marker)) return 0;
+  char cmd[4096];
+  snprintf(cmd, sizeof(cmd), "cmd.exe /c if exist \"%s\" rmdir \"%s\" & mklink /J \"%s\" \"%s\"",
+           link_path, link_path, link_path, app_dir);
+  STARTUPINFOA si = {0};
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESHOWWINDOW;
+  si.wShowWindow = SW_HIDE;
+  PROCESS_INFORMATION pi = {0};
+  if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+  }
+  return file_exists(marker) ? 0 : -1;
+#else
+  char link_path[MAX_PATH_BUF];
+  snprintf(link_path, sizeof(link_path), "%s/resources/app", electron_dir);
+  unlink(link_path);
+  return symlink(app_dir, link_path);
+#endif
+}
+
+static int spawn_detached_electron(const char *electron_bin, const char *electron_dir, const char *app_dir, int argc, char **argv) {
+  int linked = (ensure_resources_app_link(electron_dir, app_dir) == 0);
 #if defined(_WIN32)
   char cmd[4096];
-  int pos = snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\"", electron_bin, app_dir);
+  /* When resources/app is linked inside Electron, boot Electron with no app_dir arg
+     so process.resourcesPath + '/app' matches 100% (TextMate onig.wasm + 95 extensions work!) */
+  int pos = linked
+      ? snprintf(cmd, sizeof(cmd), "\"%s\"", electron_bin)
+      : snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\"", electron_bin, app_dir);
   for (int i = 1; i < argc && pos < (int)sizeof(cmd) - 64; i++) {
     if (strcmp(argv[i], "--upstream") == 0 || strcmp(argv[i], "--no-splash") == 0) continue;
     pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos, " \"%s\"", argv[i]);
@@ -258,9 +292,9 @@ static int spawn_detached_electron(const char *electron_bin, const char *app_dir
   if (!child_argv) return 1;
   int out_i = 0;
   child_argv[out_i++] = electron_bin;
-  child_argv[out_i++] = app_dir;
+  if (!linked) child_argv[out_i++] = app_dir;
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--upstream") == 0) continue;
+    if (strcmp(argv[i], "--upstream") == 0 || strcmp(argv[i], "--no-splash") == 0) continue;
     child_argv[out_i++] = argv[i];
   }
   child_argv[out_i] = NULL;
@@ -325,6 +359,9 @@ int main(int argc, char **argv) {
         snprintf(abi_path, sizeof(abi_path), "%s%cghost-abi%c%s%c%s",
                  cas_dir, PATH_SEP, PATH_SEP, abi_sha, PATH_SEP, OS_GHOST_ABI_KEY);
 
+        char electron_dir[MAX_PATH_BUF];
+        snprintf(electron_dir, sizeof(electron_dir), "%s%celectron%c%s",
+                 cas_dir, PATH_SEP, PATH_SEP, electron_sha);
         if (file_exists(electron_bin) && file_exists(app_pkg) && file_exists(abi_path)) {
           free(json);
           set_env_var("B8G_GHOST_ABI_PATH", abi_path);
@@ -333,7 +370,7 @@ int main(int argc, char **argv) {
           if (!no_splash) {
             lumi_splash_set(55, "Warm CAS hit: Electron + Code - OSS + B8G_ARENA_V1");
           }
-          int rc = spawn_detached_electron(electron_bin, app_dir, argc, argv);
+          int rc = spawn_detached_electron(electron_bin, electron_dir, app_dir, argc, argv);
           if (!no_splash) {
             lumi_splash_set(100, rc == 0 ? "Code - OSS launched!" : "Failed to launch Electron");
 #if defined(_WIN32)

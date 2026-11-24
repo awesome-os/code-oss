@@ -13,7 +13,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -305,6 +305,24 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
     );
   }
 
+  // Link <electron_dir>/resources/app -> <code_oss_dir>/resources/app (zero-copy junction/symlink)
+  // so process.resourcesPath + '/app' resolves TextMate onig.wasm & all 95 built-in extensions.
+  const resourcesAppLink = join(electron.installDir, 'resources', 'app');
+  let linkedApp = false;
+  try {
+    if (!existsSync(join(resourcesAppLink, 'package.json'))) {
+      try {
+        if (lstatSync(resourcesAppLink)) rmSync(resourcesAppLink, { recursive: true, force: true });
+      } catch {
+        // Not present yet
+      }
+      symlinkSync(codeOssApp.appDir, resourcesAppLink, process.platform === 'win32' ? 'junction' : 'dir');
+    }
+    linkedApp = existsSync(join(resourcesAppLink, 'package.json'));
+  } catch {
+    linkedApp = false;
+  }
+
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
     B8G_GHOST_ABI_PATH: ghostAbi.addonPath,
@@ -314,7 +332,8 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
   delete childEnv.VSCODE_IPC_HOOK;
   delete childEnv.VSCODE_PID;
 
-  const child = spawn(electron.executablePath, [codeOssApp.appDir, ...parsed.forwardArgs], {
+  const spawnArgs = linkedApp ? [...parsed.forwardArgs] : [codeOssApp.appDir, ...parsed.forwardArgs];
+  const child = spawn(electron.executablePath, spawnArgs, {
     stdio: 'inherit',
     windowsHide: false,
     env: childEnv,
