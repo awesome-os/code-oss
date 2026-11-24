@@ -234,44 +234,83 @@ static int run_hydration_cli_with_splash(const char *cli_path, int argc, char **
 }
 #endif
 
-static int ensure_resources_app_link(const char *electron_dir, const char *app_dir) {
+static int ensure_isolated_code_oss_runtime(
+    const char *cas_dir,
+    const char *electron_dir,
+    const char *electron_sha,
+    const char *app_dir,
+    char *out_electron_bin,
+    size_t out_cap) {
 #if defined(_WIN32)
+  char rt_dir[MAX_PATH_BUF];
+  snprintf(rt_dir, sizeof(rt_dir), "%s\\code-oss-runtime\\%.12s", cas_dir, electron_sha);
+  snprintf(out_electron_bin, out_cap, "%s\\electron.exe", rt_dir);
+  char res_dir[MAX_PATH_BUF];
+  snprintf(res_dir, sizeof(res_dir), "%s\\resources", rt_dir);
   char link_path[MAX_PATH_BUF];
-  snprintf(link_path, sizeof(link_path), "%s\\resources\\app", electron_dir);
+  snprintf(link_path, sizeof(link_path), "%s\\app", res_dir);
   char marker[MAX_PATH_BUF];
   snprintf(marker, sizeof(marker), "%s\\package.json", link_path);
-  if (file_exists(marker)) return 0;
+
+  if (file_exists(out_electron_bin) && file_exists(marker)) {
+    return 0;
+  }
+
+  /* Create zero-copy hardlinks for all top-level Electron files + locales junction + resources/app junction.
+     Leaves ~/.b8g/cas/electron/<sha>/ 100% untouched for sectium-browser and other apps! */
   char cmd[4096];
-  snprintf(cmd, sizeof(cmd), "cmd.exe /c if exist \"%s\" rmdir \"%s\" & mklink /J \"%s\" \"%s\"",
-           link_path, link_path, link_path, app_dir);
+  snprintf(
+      cmd, sizeof(cmd),
+      "cmd.exe /c mkdir \"%s\" 2>nul & mkdir \"%s\" 2>nul & "
+      "for %%F in (\"%s\\*\") do if not exist \"%s\\%%~nxF\" mklink /H \"%s\\%%~nxF\" \"%%F\" >nul 2>&1 & "
+      "if not exist \"%s\\locales\" mklink /J \"%s\\locales\" \"%s\\locales\" >nul 2>&1 & "
+      "if exist \"%s\" rmdir \"%s\" >nul 2>&1 & "
+      "mklink /J \"%s\" \"%s\" >nul 2>&1",
+      rt_dir, res_dir,
+      electron_dir, rt_dir, rt_dir,
+      rt_dir, rt_dir, electron_dir,
+      link_path, link_path,
+      link_path, app_dir);
+
   STARTUPINFOA si = {0};
   si.cb = sizeof(si);
   si.dwFlags = STARTF_USESHOWWINDOW;
   si.wShowWindow = SW_HIDE;
   PROCESS_INFORMATION pi = {0};
   if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-    WaitForSingleObject(pi.hProcess, 5000);
+    WaitForSingleObject(pi.hProcess, 8000);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
   }
-  return file_exists(marker) ? 0 : -1;
+  return (file_exists(out_electron_bin) && file_exists(marker)) ? 0 : -1;
 #else
+  (void)cas_dir;
+  (void)electron_sha;
   char link_path[MAX_PATH_BUF];
   snprintf(link_path, sizeof(link_path), "%s/resources/app", electron_dir);
+  snprintf(out_electron_bin, out_cap, "%s/electron", electron_dir);
   unlink(link_path);
   return symlink(app_dir, link_path);
 #endif
 }
 
-static int spawn_detached_electron(const char *electron_bin, const char *electron_dir, const char *app_dir, int argc, char **argv) {
-  int linked = (ensure_resources_app_link(electron_dir, app_dir) == 0);
+static int spawn_detached_electron(
+    const char *cas_dir,
+    const char *electron_bin,
+    const char *electron_dir,
+    const char *electron_sha,
+    const char *app_dir,
+    int argc,
+    char **argv) {
+  char isolated_bin[MAX_PATH_BUF];
+  int isolated = (ensure_isolated_code_oss_runtime(
+                      cas_dir, electron_dir, electron_sha, app_dir, isolated_bin, sizeof(isolated_bin)) == 0);
+  const char *launch_bin = isolated ? isolated_bin : electron_bin;
 #if defined(_WIN32)
   char cmd[4096];
-  /* When resources/app is linked inside Electron, boot Electron with no app_dir arg
-     so process.resourcesPath + '/app' matches 100% (TextMate onig.wasm + 95 extensions work!) */
-  int pos = linked
-      ? snprintf(cmd, sizeof(cmd), "\"%s\"", electron_bin)
-      : snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\"", electron_bin, app_dir);
+  int pos = isolated
+      ? snprintf(cmd, sizeof(cmd), "\"%s\"", launch_bin)
+      : snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\"", launch_bin, app_dir);
   for (int i = 1; i < argc && pos < (int)sizeof(cmd) - 64; i++) {
     if (strcmp(argv[i], "--upstream") == 0 || strcmp(argv[i], "--no-splash") == 0) continue;
     pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos, " \"%s\"", argv[i]);
@@ -279,8 +318,6 @@ static int spawn_detached_electron(const char *electron_bin, const char *electro
   STARTUPINFOA si = {0};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi = {0};
-  /* DETACHED_PROCESS completely detaches Electron from the parent PowerShell/cmd console
-     so Electron logs never pollute the prompt and closing the window exits cleanly. */
   DWORD flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
   BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, FALSE, flags, NULL, NULL, &si, &pi);
   if (!ok) return 127;
@@ -291,14 +328,14 @@ static int spawn_detached_electron(const char *electron_bin, const char *electro
   const char **child_argv = (const char **)calloc((size_t)argc + 3, sizeof(char *));
   if (!child_argv) return 1;
   int out_i = 0;
-  child_argv[out_i++] = electron_bin;
-  if (!linked) child_argv[out_i++] = app_dir;
+  child_argv[out_i++] = launch_bin;
+  if (!isolated) child_argv[out_i++] = app_dir;
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--upstream") == 0 || strcmp(argv[i], "--no-splash") == 0) continue;
     child_argv[out_i++] = argv[i];
   }
   child_argv[out_i] = NULL;
-  execvp(electron_bin, (char *const *)child_argv);
+  execvp(launch_bin, (char *const *)child_argv);
   perror("execvp");
   free(child_argv);
   return 127;
@@ -370,7 +407,7 @@ int main(int argc, char **argv) {
           if (!no_splash) {
             lumi_splash_set(55, "Warm CAS hit: Electron + Code - OSS + B8G_ARENA_V1");
           }
-          int rc = spawn_detached_electron(electron_bin, electron_dir, app_dir, argc, argv);
+          int rc = spawn_detached_electron(cas_dir, electron_bin, electron_dir, electron_sha, app_dir, argc, argv);
           if (!no_splash) {
             lumi_splash_set(100, rc == 0 ? "Code - OSS launched!" : "Failed to launch Electron");
 #if defined(_WIN32)
