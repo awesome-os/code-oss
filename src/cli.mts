@@ -305,14 +305,19 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
     );
   }
 
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    B8G_GHOST_ABI_PATH: ghostAbi.addonPath,
+    B8G_GHOST_CAS_DIR: ghostAbi.cacheDir,
+  };
+  delete childEnv.ELECTRON_RUN_AS_NODE;
+  delete childEnv.VSCODE_IPC_HOOK;
+  delete childEnv.VSCODE_PID;
+
   const child = spawn(electron.executablePath, [codeOssApp.appDir, ...parsed.forwardArgs], {
     stdio: 'inherit',
     windowsHide: false,
-    env: {
-      ...process.env,
-      B8G_GHOST_ABI_PATH: ghostAbi.addonPath,
-      B8G_GHOST_CAS_DIR: ghostAbi.cacheDir,
-    },
+    env: childEnv,
   });
 
   child.on('close', (code) => {
