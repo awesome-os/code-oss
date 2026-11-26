@@ -1,3 +1,5 @@
+> [!NOTE] Consolidated into the unified Holo v11 OS monorepo at https://github.com/awesome-os/awesome-os
+
 # `@awesome-os/code-oss`
 
 Telemetry-free **Code - OSS** (VS Code MIT) hydrated on **shared debloated Electron** + **`b8g-ghost` CAS (`cas-v1`)** + **Wave 2 TypeScript `6.0.3` (`14.3x` faster Zero-AST CAS)** + **5 default Awesome-OS extensions** with a **`~120 KB` native C11 launcher** — eliminating VSCodium's `~350 MB` duplicate installers and per-app Chromium/Electron bloat.
